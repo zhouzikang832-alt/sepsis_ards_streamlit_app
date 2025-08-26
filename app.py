@@ -1,4 +1,3 @@
-
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -38,9 +37,8 @@ with col2:
     abs_mono = st.number_input("绝对单核细胞计数 (×10⁹/L)", min_value=0.0, max_value=5.0, value=0.5, step=0.01, format="%.2f")
     vent = st.selectbox("是否使用机械通气", ["否", "是"])
 
-# 备注：请确保下方特征顺序与训练时一致；若您的 final_model.pkl 是 sklearn Pipeline，通常会自动对齐特征。
+# 组装输入为 DataFrame，确保特征顺序与训练时一致
 default_feature_names = ["age", "spo2_max", "ph", "absolute_monocytes", "vent", "hr_min"]
-# 组装输入为 DataFrame，列名与默认特征名一致
 X_df = pd.DataFrame([{
     "age": age,
     "spo2_max": spo2_max,
@@ -62,34 +60,27 @@ pred_btn = st.button("开始预测")
 
 if pred_btn:
     try:
-        # 如果模型是 sklearn 风格，有 predict_proba：
-        if hasattr(model, "predict_proba"):
-            proba = float(model.predict_proba(X_df)[0, 1])
-            y_pred = int(proba >= threshold)
-        else:
-            # 如果没有 predict_proba，用 predict 的输出（可能是 0/1 或概率），这里做兼容
-            raw = model.predict(X_df)
-            try:
-                proba = float(raw[0])
-                y_pred = int(proba >= threshold)
-            except Exception:
-                y_pred = int(raw[0])
-                proba = float(y_pred)
-
-        st.success(f"预测概率（肠道菌群紊乱）: {proba:.2%}")
+        # 确保输入数据是DataFrame格式（符合scikit-learn模型的输入要求）
+        prediction = model.predict(X_df)
+        probability = model.predict_proba(X_df)[:, 1]  # 取阳性类别的概率
+        
+        # 计算基于阈值的分类结果
+        y_pred = int(probability[0] >= threshold)
+        
+        st.success(f"预测概率（肠道菌群紊乱）: {probability[0]:.2%}")
         if y_pred == 1:
             st.warning("⚠ 高风险：建议尽早进行肠道功能评估、营养支持优化、益生菌/益生元等干预，并密切监测。")
         else:
             st.info("✅ 低风险：继续常规管理，并根据病情动态复评。")
 
-        # --- 5. 可选：简单可解释性（占位展示） ---
+        # --- 5. 模型可解释性部分 ---
         with st.expander("模型可解释性（提示：若需要 SHAP，请在模型训练时保留特征名或将 Pipeline 一并保存）"):
             # 尝试获取特征名
             feat_names = None
             if hasattr(model, "feature_names_in_"):
                 feat_names = list(model.feature_names_in_)
             elif hasattr(model, "named_steps"):
-                # 尝试从 Pipeline 中获取
+                # 尝试从Pipeline中获取
                 try:
                     last_step_name, last_step = list(model.named_steps.items())[-1]
                     if hasattr(last_step, "feature_names_in_"):
@@ -101,15 +92,12 @@ if pred_btn:
                 feat_names = default_feature_names
 
             st.write("用于预测的特征顺序（请与训练保持一致）:", feat_names)
-
-            # 占位：展示用户本次输入（便于临床记录）
             st.write("该患者输入向量：")
             st.json(X_df.iloc[0].to_dict())
-
             st.caption("说明：若要显示 SHAP 值，请在训练阶段保留预处理管线（OneHot/StandardScaler等）与特征名，并在此处使用与训练一致的列。")
 
     except Exception as e:
-        st.error(f"预测失败：{e}")
+        st.error(f"预测失败：{str(e)}")
         st.stop()
 
 st.divider()
