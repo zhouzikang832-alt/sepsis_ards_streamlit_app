@@ -1,107 +1,206 @@
+# app.py
 import streamlit as st
 import numpy as np
 import pandas as pd
+import joblib
 import pickle
+import traceback
 
 st.set_page_config(page_title="Sepsis–ARDS Gut Dysbiosis Risk Predictor", layout="centered")
 
 st.title("🧬 Sepsis–ARDS Gut Dysbiosis Risk Predictor")
-st.caption("基于 Python/Streamlit 的在线预测工具。将您训练好的模型 final_model.pkl 放在同目录即可运行。")
+st.caption("Upload your trained model as `final_model.pkl` in the app folder. This app will try joblib.load first, then pickle.load.")
 
-# --- 1. 加载模型 ---
+# -------------------------
+# Model loading utilities
+# -------------------------
 @st.cache_resource(show_spinner=True)
-def load_model():
+def load_model(path: str = "final_model.pkl"):
+    """
+    Try to load a model with joblib first (recommended for sklearn objects),
+    then try pickle. Return (model_obj, None) on success or (None, error_message) on failure.
+    """
     try:
-        with open("final_model.pkl", "rb") as f:
-            model = pickle.load(f)
+        model = joblib.load(path)
         return model, None
-    except Exception as e:
-        return None, e
+    except Exception as e_joblib:
+        # fallback to pickle
+        try:
+            with open(path, "rb") as f:
+                model = pickle.load(f)
+            return model, None
+        except Exception as e_pickle:
+            tb = traceback.format_exc()
+            return None, f"Failed to load model. joblib error: {e_joblib}; pickle error: {e_pickle}\n{tb}"
 
-model, load_err = load_model()
-if load_err:
-    st.error(f"未能加载模型（final_model.pkl）。\n错误信息：{load_err}")
+def unwrap_model(obj):
+    """
+    If a tuple/list was saved, try to find the first element with a predict method.
+    Otherwise return obj if it has predict, or None if no usable model is found.
+    """
+    if isinstance(obj, (list, tuple)):
+        for elt in obj:
+            if hasattr(elt, "predict"):
+                return elt
+        return None
+    if hasattr(obj, "predict"):
+        return obj
+    return None
+
+def get_expected_feature_names(model_obj):
+    """
+    Try to obtain expected feature names from model or pipeline.
+    Returns a list of names or None.
+    """
+    # direct attribute
+    if hasattr(model_obj, "feature_names_in_"):
+        return list(model_obj.feature_names_in_)
+    # pipeline: try to locate final estimator
+    if hasattr(model_obj, "named_steps"):
+        try:
+            # get last step
+            last_step = list(model_obj.named_steps.items())[-1][1]
+            if hasattr(last_step, "feature_names_in_"):
+                return list(last_step.feature_names_in_)
+        except Exception:
+            pass
+    return None
+
+# -------------------------
+# Load model
+# -------------------------
+model_raw, load_error = load_model("final_model.pkl")
+
+if load_error:
+    st.error("Model failed to load.\n\n" + load_error)
     st.stop()
 
-# --- 2. 特征输入区（可根据训练时的特征顺序与含义自行调整） ---
-st.subheader("输入关键临床参数")
+# If loaded object is a numpy array -> likely saved predictions rather than model
+if isinstance(model_raw, np.ndarray):
+    st.error(
+        "The file final_model.pkl contains a numpy.ndarray (likely saved predictions), not a model object.\n\n"
+        "Please re-save your trained model object using e.g.:\n"
+        "  joblib.dump(trained_model, 'final_model.pkl')\n\n"
+        "Then upload the new final_model.pkl and redeploy."
+    )
+    st.stop()
+
+# If object is tuple/list or something, unwrap to actual model
+model = unwrap_model(model_raw)
+if model is None:
+    st.error(
+        "The loaded object is not a model (no .predict found).\n\n"
+        f"Loaded object type: {type(model_raw)}\n\n"
+        "If you saved multiple objects, please save the fitted estimator (e.g. joblib.dump(model, 'final_model.pkl'))."
+    )
+    st.stop()
+
+st.success(f"Model loaded successfully. Model type: {type(model)}")
+
+# -------------------------
+# Input panel
+# -------------------------
+st.subheader("Input patient parameters")
 col1, col2 = st.columns(2)
 
 with col1:
-    age = st.number_input("年龄 (years)", min_value=18, max_value=100, value=60, step=1)
-    spo2_max = st.number_input("SPO₂ 最大值 (%)", min_value=50, max_value=100, value=95, step=1)
-    hr_min = st.number_input("心率最小值 HR-MIN (bpm)", min_value=20, max_value=200, value=60, step=1)
+    age = st.number_input("Age (years)", min_value=18, max_value=120, value=60)
+    spo2_max = st.number_input("SPO₂ max (%)", min_value=0, max_value=100, value=95)
+    hr_min = st.number_input("HR min (bpm)", min_value=0, max_value=300, value=60)
 
 with col2:
-    ph = st.number_input("动脉血气 pH", min_value=6.8, max_value=7.8, value=7.35, step=0.01, format="%.2f")
-    abs_mono = st.number_input("绝对单核细胞计数 (×10⁹/L)", min_value=0.0, max_value=5.0, value=0.5, step=0.01, format="%.2f")
-    vent = st.selectbox("是否使用机械通气", ["否", "是"])
+    ph = st.number_input("Arterial pH", min_value=6.8, max_value=7.8, value=7.35, format="%.2f")
+    abs_mono = st.number_input("Absolute monocytes (×10⁹/L)", min_value=0.0, max_value=50.0, value=0.5, format="%.2f")
+    vent = st.selectbox("Mechanical ventilation?", ["No", "Yes"])
 
-# 组装输入为 DataFrame，确保特征顺序与训练时一致
-default_feature_names = ["age", "spo2_max", "ph", "absolute_monocytes", "vent", "hr_min"]
-X_df = pd.DataFrame([{
+# Build DataFrame for a single patient - update these column names to match your trained model
+user_input = pd.DataFrame([{
     "age": age,
     "spo2_max": spo2_max,
     "ph": ph,
     "absolute_monocytes": abs_mono,
-    "vent": 1 if vent == "是" else 0,
-    "hr_min": hr_min,
+    "vent": 1 if vent == "Yes" else 0,
+    "hr_min": hr_min
 }])
 
-st.markdown("**当前提交的特征**：")
-st.dataframe(X_df)
+st.markdown("**Submitted features:**")
+st.dataframe(user_input)
 
-# --- 3. 预测参数设置 ---
-st.subheader("预测设置")
-threshold = st.slider("分类阈值（根据您的研究，建议 0.95）", 0.0, 1.0, 0.95, 0.01)
+# -------------------------
+# Prediction helpers
+# -------------------------
+threshold = st.slider("Probability threshold (suggested: 0.95)", 0.0, 1.0, 0.95, 0.01)
 
-# --- 4. 执行预测 ---
-pred_btn = st.button("开始预测")
-
-if pred_btn:
-    try:
-        # 确保输入数据是DataFrame格式（符合scikit-learn模型的输入要求）
-        prediction = model.predict(X_df)
-        probability = model.predict_proba(X_df)[:, 1]  # 取阳性类别的概率
-        
-        # 计算基于阈值的分类结果
-        y_pred = int(probability[0] >= threshold)
-        
-        st.success(f"预测概率（肠道菌群紊乱）: {probability[0]:.2%}")
-        if y_pred == 1:
-            st.warning("⚠ 高风险：建议尽早进行肠道功能评估、营养支持优化、益生菌/益生元等干预，并密切监测。")
+def align_input_columns(input_df: pd.DataFrame, expected_cols):
+    """
+    Try to align input columns with expected_cols using case-insensitive matching.
+    If some expected columns are missing, return (None, error_message).
+    """
+    provided = list(input_df.columns)
+    lc_provided = {c.lower(): c for c in provided}
+    reordered = []
+    for col in expected_cols:
+        if col in input_df.columns:
+            reordered.append(col)
+        elif col.lower() in lc_provided:
+            reordered.append(lc_provided[col.lower()])
         else:
-            st.info("✅ 低风险：继续常规管理，并根据病情动态复评。")
+            return None, f"Model expects column '{col}' but it was not provided. Provided columns: {provided}"
+    return input_df[reordered].copy(), None
 
-        # --- 5. 模型可解释性部分 ---
-        with st.expander("模型可解释性（提示：若需要 SHAP，请在模型训练时保留特征名或将 Pipeline 一并保存）"):
-            # 尝试获取特征名
-            feat_names = None
-            if hasattr(model, "feature_names_in_"):
-                feat_names = list(model.feature_names_in_)
-            elif hasattr(model, "named_steps"):
-                # 尝试从Pipeline中获取
-                try:
-                    last_step_name, last_step = list(model.named_steps.items())[-1]
-                    if hasattr(last_step, "feature_names_in_"):
-                        feat_names = list(last_step.feature_names_in_)
-                except Exception:
-                    pass
+# -------------------------
+# Prediction action
+# -------------------------
+if st.button("Predict"):
+    try:
+        # Get expected feature names if available and align
+        expected = get_expected_feature_names(model)
+        if expected is not None:
+            X_in, err = align_input_columns(user_input, expected)
+            if err:
+                st.error("Feature mismatch: " + err)
+                st.stop()
+        else:
+            # If model does not expose expected names, use the user_input as is (assume correct order)
+            X_in = user_input
 
-            if feat_names is None:
-                feat_names = default_feature_names
+        # Ensure DataFrame (many models accept DataFrame or 2D numpy)
+        if not isinstance(X_in, pd.DataFrame):
+            X_in = pd.DataFrame(X_in)
 
-            st.write("用于预测的特征顺序（请与训练保持一致）:", feat_names)
-            st.write("该患者输入向量：")
-            st.json(X_df.iloc[0].to_dict())
-            st.caption("说明：若要显示 SHAP 值，请在训练阶段保留预处理管线（OneHot/StandardScaler等）与特征名，并在此处使用与训练一致的列。")
+        # Prediction probability if possible
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X_in)
+            # handle cases where predict_proba returns shape (n,) or (n,1) or (n,2)
+            if proba.ndim == 1:
+                pos_prob = proba
+            elif proba.shape[1] >= 2:
+                pos_prob = proba[:, 1]
+            else:
+                pos_prob = proba[:, 0]
+            prob = float(pos_prob[0])
+        elif hasattr(model, "decision_function"):
+            score = model.decision_function(X_in)
+            # convert score to probability with sigmoid
+            prob = float(1.0 / (1.0 + np.exp(-float(score[0]))))
+        else:
+            # fallback: use predict labels (0/1)
+            pred_label = model.predict(X_in)
+            prob = float(pred_label[0])
+        
+        predicted_label = int(prob >= threshold)
+
+        st.success(f"Predicted probability (gut dysbiosis): {prob:.2%}")
+        if predicted_label == 1:
+            st.warning("⚠ HIGH RISK: Consider early gut monitoring/intervention (nutrition, probiotics, etc.).")
+        else:
+            st.info("✅ LOW RISK: Continue routine care and reassess as needed.")
 
     except Exception as e:
-        st.error(f"预测失败：{str(e)}")
+        tb = traceback.format_exc()
+        st.error(f"Prediction failed: {e}\n\nTraceback:\n{tb}")
         st.stop()
 
-st.divider()
 st.markdown(
-    "**机制背景（肠-肺轴）**：脓毒症导致的肠道屏障破坏与菌群紊乱可通过肠-肺轴加重肺部炎症，"
-    "从而影响 ARDS 进程与预后。本工具旨在帮助医生更早识别高风险人群，争取早期干预窗口。"
+    "**Mechanistic background (gut–lung axis):** Sepsis-related gut barrier disruption and dysbiosis can aggravate pulmonary inflammation via the gut–lung axis, thereby worsening ARDS. Early identification of gut dysbiosis risk allows clinicians to intervene earlier."
 )
