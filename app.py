@@ -1,43 +1,36 @@
-# app.py
+# app.py (dynamic feature UI + robust alignment)
 import streamlit as st
-import numpy as np
 import pandas as pd
+import numpy as np
 import joblib
 import pickle
 import traceback
+import re
+from typing import List, Tuple, Dict
 
 st.set_page_config(page_title="Sepsis–ARDS Gut Dysbiosis Risk Predictor", layout="centered")
-
 st.title("🧬 Sepsis–ARDS Gut Dysbiosis Risk Predictor")
-st.caption("Upload your trained model as `final_model.pkl` in the app folder. This app will try joblib.load first, then pickle.load.")
+st.caption("This app inspects your model's expected features and builds input fields automatically. Upload final_model.pkl to the app folder.")
 
 # -------------------------
-# Model loading utilities
+# Helper functions
 # -------------------------
-@st.cache_resource(show_spinner=True)
-def load_model(path: str = "final_model.pkl"):
-    """
-    Try to load a model with joblib first (recommended for sklearn objects),
-    then try pickle. Return (model_obj, None) on success or (None, error_message) on failure.
-    """
+def load_model(path="final_model.pkl"):
+    """Try joblib then pickle."""
     try:
-        model = joblib.load(path)
-        return model, None
+        mdl = joblib.load(path)
+        return mdl, None
     except Exception as e_joblib:
-        # fallback to pickle
         try:
             with open(path, "rb") as f:
-                model = pickle.load(f)
-            return model, None
+                mdl = pickle.load(f)
+            return mdl, None
         except Exception as e_pickle:
             tb = traceback.format_exc()
-            return None, f"Failed to load model. joblib error: {e_joblib}; pickle error: {e_pickle}\n{tb}"
+            return None, f"joblib error: {e_joblib}\n\npickle error: {e_pickle}\n\nTraceback:\n{tb}"
 
 def unwrap_model(obj):
-    """
-    If a tuple/list was saved, try to find the first element with a predict method.
-    Otherwise return obj if it has predict, or None if no usable model is found.
-    """
+    """If a list/tuple was saved, find first element that has .predict"""
     if isinstance(obj, (list, tuple)):
         for elt in obj:
             if hasattr(elt, "predict"):
@@ -47,160 +40,282 @@ def unwrap_model(obj):
         return obj
     return None
 
-def get_expected_feature_names(model_obj):
-    """
-    Try to obtain expected feature names from model or pipeline.
-    Returns a list of names or None.
-    """
-    # direct attribute
+def get_expected_feature_names(model_obj) -> List[str]:
+    """Try to get expected feature names from model or pipeline."""
     if hasattr(model_obj, "feature_names_in_"):
         return list(model_obj.feature_names_in_)
-    # pipeline: try to locate final estimator
+    # If pipeline, try to find preprocessor or final estimator
     if hasattr(model_obj, "named_steps"):
+        # sometimes the preprocessor stores the names, or final estimator has feature_names_in_
+        for name, step in model_obj.named_steps.items():
+            if hasattr(step, "feature_names_in_"):
+                return list(step.feature_names_in_)
+        # try last estimator
         try:
-            # get last step
-            last_step = list(model_obj.named_steps.items())[-1][1]
-            if hasattr(last_step, "feature_names_in_"):
-                return list(last_step.feature_names_in_)
+            last = list(model_obj.named_steps.items())[-1][1]
+            if hasattr(last, "feature_names_in_"):
+                return list(last.feature_names_in_)
         except Exception:
             pass
     return None
 
+def group_onehot_like(cols: List[str]) -> Dict[str, List[str]]:
+    """
+    If many cols share prefix separated by '_' (e.g. Sex_Male, Sex_Female),
+    return groups: prefix -> list of full columns.
+    """
+    groups = {}
+    for c in cols:
+        if "_" in c:
+            prefix = c.split("_")[0]
+            groups.setdefault(prefix, []).append(c)
+    # only keep groups that have >1 member
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+def default_value_for_feature(name: str):
+    """Heuristic default values for common clinical features."""
+    s = name.lower()
+    if "age" in s:
+        return 60
+    if "sex" in s or "gender" in s:
+        return "Male"
+    if "race" in s:
+        return "White"
+    if "spo2" in s:
+        return 95
+    if "ph" in s:
+        return 7.35
+    if "hr" in s or "heart" in s:
+        return 60
+    if "lac" in s or "lactate" in s:
+        return 2.0
+    if "wbc" in s:
+        return 12.0
+    if "cre" in s or "cr" in s:
+        return 1.0
+    if "album" in s:
+        return 3.5
+    if "plate" in s or "plt" in s:
+        return 200
+    if "bun" in s:
+        return 14
+    if "na" == s or s.endswith("_na") or "natrium" in s:
+        return 140
+    if "k" == s or s.endswith("_k"):
+        return 4.0
+    if "vent" in s or "mechan" in s:
+        return "No"
+    # fallback numeric
+    return 0.0
+
+def infer_input_widgets(expected: List[str]):
+    """
+    Build UI inputs for the expected features.
+    Returns a dict: feature_name -> value (raw), and also returns the final DataFrame matching expected.
+    """
+    st.write("### Model expects these features:")
+    st.write(expected)
+
+    # Detect onehot-like groups
+    onehot_groups = group_onehot_like(expected)  # prefix -> list of columns
+
+    # Build UI for grouped (one-hot) features
+    chosen_values = {}  # group_prefix -> choice
+    for prefix, full_cols in onehot_groups.items():
+        # derive labels from suffixes
+        labels = [c[len(prefix)+1:] for c in full_cols]
+        # clean labels
+        labels = [lab.replace("_", " ").replace("-", " ").strip() for lab in labels]
+        choice = st.selectbox(f"{prefix} (choose one)", options=labels, index=0)
+        chosen_values[prefix] = choice
+
+    # Build UI for remaining features (not handled as one-hot group)
+    remaining = [c for c in expected if not any(c in cols for cols in onehot_groups.values())]
+    values = {}  # final raw mapping for remaining expected columns
+    # Build a per-base UI: if column is plain categorical like 'Sex' present selectbox
+    for feat in remaining:
+        low = feat.lower()
+        # skip if already covered (should not happen)
+        if feat in sum(list(onehot_groups.values()), []):
+            continue
+        # common categorical heuristics
+        if any(k in low for k in ["sex", "gender"]):
+            val = st.selectbox(f"{feat}", options=["Male", "Female", "Other", "Unknown"], index=0)
+            values[feat] = val
+        elif "race" in low:
+            val = st.selectbox(f"{feat}", options=["White", "Black", "Asian", "Hispanic", "Other", "Unknown"], index=0)
+            values[feat] = val
+        elif any(k in low for k in ["vent", "mechan", "intub", "mv"]):
+            val = st.selectbox(f"{feat}", options=["No", "Yes"], index=0)
+            values[feat] = 1 if val == "Yes" else 0
+        elif any(k in low for k in ["ne","epi","da","dobu","milri","vaso","press"]):
+            # vasoactive drugs: assume numeric 0/1 if named as a flag in training
+            val = st.selectbox(f"{feat}", options=["No", "Yes"], index=0)
+            values[feat] = 1 if val == "Yes" else 0
+        else:
+            # numeric by default: use heuristic default
+            d = default_value_for_feature(feat)
+            if isinstance(d, str):
+                # fallback to text input
+                txt = st.text_input(f"{feat}", value=d)
+                values[feat] = txt
+            else:
+                # numeric input
+                step = 0.01 if ("ph" in feat.lower() or "ratio" in feat.lower()) else 1.0
+                # choose range heuristics
+                v = st.number_input(f"{feat}", value=float(d), step=step)
+                values[feat] = v
+
+    # Build final DataFrame matching expected columns:
+    final_row = {}
+    for feat in expected:
+        # if feat is part of a one-hot group, set 1/0
+        matched_group = None
+        for prefix, cols in onehot_groups.items():
+            if feat in cols:
+                matched_group = prefix
+                break
+        if matched_group is not None:
+            chosen = chosen_values[matched_group]
+            suffix = feat[len(matched_group)+1:].replace("_", " ").replace("-", " ").strip()
+            # If selected label equals suffix -> 1 else 0
+            final_row[feat] = 1 if suffix == chosen else 0
+            continue
+
+        # otherwise from values map
+        if feat in values:
+            final_row[feat] = values[feat]
+        else:
+            # last resort: try case-insensitive matches in 'values'
+            found = False
+            for k, v in values.items():
+                if k.lower() == feat.lower():
+                    final_row[feat] = v
+                    found = True
+                    break
+            if not found:
+                # fallback default
+                final_row[feat] = default_value_for_feature(feat)
+
+    final_df = pd.DataFrame([final_row], columns=expected)
+    return final_df
+
 # -------------------------
 # Load model
 # -------------------------
-model_raw, load_error = load_model("final_model.pkl")
-
-if load_error:
-    st.error("Model failed to load.\n\n" + load_error)
+model_raw, load_err = load_model("final_model.pkl")
+if load_err:
+    st.error("Failed to load model:\n\n" + load_err)
     st.stop()
 
-# If loaded object is a numpy array -> likely saved predictions rather than model
+# handle numpy array saved by mistake
 if isinstance(model_raw, np.ndarray):
-    st.error(
-        "The file final_model.pkl contains a numpy.ndarray (likely saved predictions), not a model object.\n\n"
-        "Please re-save your trained model object using e.g.:\n"
-        "  joblib.dump(trained_model, 'final_model.pkl')\n\n"
-        "Then upload the new final_model.pkl and redeploy."
-    )
+    st.error("final_model.pkl contains a numpy.ndarray (predictions), not a model.\nSave the model object with joblib.dump(model, 'final_model.pkl').")
     st.stop()
 
-# If object is tuple/list or something, unwrap to actual model
 model = unwrap_model(model_raw)
 if model is None:
-    st.error(
-        "The loaded object is not a model (no .predict found).\n\n"
-        f"Loaded object type: {type(model_raw)}\n\n"
-        "If you saved multiple objects, please save the fitted estimator (e.g. joblib.dump(model, 'final_model.pkl'))."
-    )
+    st.error(f"Loaded object is not a model (type={type(model_raw)}). Save the estimator object.")
     st.stop()
 
-st.success(f"Model loaded successfully. Model type: {type(model)}")
+st.success(f"Model loaded: {type(model)}")
 
 # -------------------------
-# Input panel
+# Provide CSV upload for one-row inputs (optional)
 # -------------------------
-st.subheader("Input patient parameters")
-col1, col2 = st.columns(2)
-
-with col1:
-    age = st.number_input("Age (years)", min_value=18, max_value=120, value=60)
-    spo2_max = st.number_input("SPO₂ max (%)", min_value=0, max_value=100, value=95)
-    hr_min = st.number_input("HR min (bpm)", min_value=0, max_value=300, value=60)
-
-with col2:
-    ph = st.number_input("Arterial pH", min_value=6.8, max_value=7.8, value=7.35, format="%.2f")
-    abs_mono = st.number_input("Absolute monocytes (×10⁹/L)", min_value=0.0, max_value=50.0, value=0.5, format="%.2f")
-    vent = st.selectbox("Mechanical ventilation?", ["No", "Yes"])
-
-# Build DataFrame for a single patient - update these column names to match your trained model
-user_input = pd.DataFrame([{
-    "age": age,
-    "spo2_max": spo2_max,
-    "ph": ph,
-    "absolute_monocytes": abs_mono,
-    "vent": 1 if vent == "Yes" else 0,
-    "hr_min": hr_min
-}])
-
-st.markdown("**Submitted features:**")
-st.dataframe(user_input)
+st.markdown("### Or upload a one-row CSV matching the model's expected columns")
+uploaded = st.file_uploader("Upload CSV (one row)", type=["csv"])
+uploaded_df = None
+if uploaded:
+    try:
+        uploaded_df = pd.read_csv(uploaded)
+        st.write("Uploaded dataframe preview:")
+        st.dataframe(uploaded_df.head())
+    except Exception as e:
+        st.error(f"Failed to read uploaded CSV: {e}")
 
 # -------------------------
-# Prediction helpers
+# Determine expected features
 # -------------------------
-threshold = st.slider("Probability threshold (suggested: 0.95)", 0.0, 1.0, 0.95, 0.01)
-
-def align_input_columns(input_df: pd.DataFrame, expected_cols):
-    """
-    Try to align input columns with expected_cols using case-insensitive matching.
-    If some expected columns are missing, return (None, error_message).
-    """
-    provided = list(input_df.columns)
-    lc_provided = {c.lower(): c for c in provided}
-    reordered = []
-    for col in expected_cols:
-        if col in input_df.columns:
-            reordered.append(col)
-        elif col.lower() in lc_provided:
-            reordered.append(lc_provided[col.lower()])
+expected = get_expected_feature_names(model)
+if expected is None:
+    st.warning("Could not auto-detect model.feature_names_in_. You can either (A) upload a one-row CSV with the exact feature columns used during training, or (B) manually provide inputs by creating a CSV locally and uploading it.")
+    # allow user to provide CSV
+    if uploaded_df is not None:
+        X_in = uploaded_df
+    else:
+        st.stop()
+else:
+    # If user uploaded CSV, validate and use it if it matches expected (case-insensitive)
+    if uploaded_df is not None:
+        # align columns case-insensitively
+        lc_map = {c.lower(): c for c in uploaded_df.columns}
+        expected_lc = [c.lower() for c in expected]
+        if all(e in lc_map for e in expected_lc):
+            # reorder columns into expected order
+            ordered = [lc_map[e] for e in expected_lc]
+            X_in = uploaded_df[ordered].copy()
         else:
-            return None, f"Model expects column '{col}' but it was not provided. Provided columns: {provided}"
-    return input_df[reordered].copy(), None
+            st.warning("Uploaded CSV does not contain all expected columns. Falling back to interactive inputs below.")
+            X_in = infer_input_widgets(expected)
+    else:
+        # Build interactive inputs dynamically
+        X_in = infer_input_widgets(expected)
+
+# Final alignment: ensure columns match expected names and order
+# If X_in has case differences, reorder
+if isinstance(X_in, pd.DataFrame):
+    # map columns case-insensitively if needed
+    col_map = {c.lower(): c for c in X_in.columns}
+    ordered_cols = []
+    for ec in expected:
+        if ec in X_in.columns:
+            ordered_cols.append(ec)
+        elif ec.lower() in col_map:
+            ordered_cols.append(col_map[ec.lower()])
+        else:
+            st.error(f"Feature mismatch: Model expects column '{ec}' but it was not provided. Provided columns: {list(X_in.columns)}")
+            st.stop()
+    # reorder and rename to exactly expected names if there were case differences
+    X_in = X_in[ordered_cols]
+    rename_map = {ordered_cols[i]: expected[i] for i in range(len(expected))}
+    X_in = X_in.rename(columns=rename_map)
+else:
+    st.error("Internal error: constructed input is not a DataFrame.")
+    st.stop()
+
+st.markdown("**Final input being sent to model (ordered to match model):**")
+st.dataframe(X_in)
 
 # -------------------------
-# Prediction action
+# Prediction
 # -------------------------
+threshold = st.slider("Probability threshold", 0.0, 1.0, 0.95, 0.01)
+
 if st.button("Predict"):
     try:
-        # Get expected feature names if available and align
-        expected = get_expected_feature_names(model)
-        if expected is not None:
-            X_in, err = align_input_columns(user_input, expected)
-            if err:
-                st.error("Feature mismatch: " + err)
-                st.stop()
-        else:
-            # If model does not expose expected names, use the user_input as is (assume correct order)
-            X_in = user_input
-
-        # Ensure DataFrame (many models accept DataFrame or 2D numpy)
-        if not isinstance(X_in, pd.DataFrame):
-            X_in = pd.DataFrame(X_in)
-
-        # Prediction probability if possible
+        # Try predict_proba, fallback to decision_function or predict
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(X_in)
-            # handle cases where predict_proba returns shape (n,) or (n,1) or (n,2)
             if proba.ndim == 1:
-                pos_prob = proba
+                pos = proba
             elif proba.shape[1] >= 2:
-                pos_prob = proba[:, 1]
+                pos = proba[:, 1]
             else:
-                pos_prob = proba[:, 0]
-            prob = float(pos_prob[0])
+                pos = proba[:, 0]
+            prob = float(pos[0])
         elif hasattr(model, "decision_function"):
             score = model.decision_function(X_in)
-            # convert score to probability with sigmoid
             prob = float(1.0 / (1.0 + np.exp(-float(score[0]))))
         else:
-            # fallback: use predict labels (0/1)
-            pred_label = model.predict(X_in)
-            prob = float(pred_label[0])
-        
-        predicted_label = int(prob >= threshold)
+            pred = model.predict(X_in)
+            prob = float(pred[0])
 
+        y_pred = int(prob >= threshold)
         st.success(f"Predicted probability (gut dysbiosis): {prob:.2%}")
-        if predicted_label == 1:
-            st.warning("⚠ HIGH RISK: Consider early gut monitoring/intervention (nutrition, probiotics, etc.).")
+        if y_pred == 1:
+            st.warning("⚠ HIGH RISK: consider early gut monitoring/intervention (nutrition, probiotics, etc.)")
         else:
-            st.info("✅ LOW RISK: Continue routine care and reassess as needed.")
-
+            st.info("✅ LOW RISK: routine management; reassess as needed.")
     except Exception as e:
-        tb = traceback.format_exc()
-        st.error(f"Prediction failed: {e}\n\nTraceback:\n{tb}")
-        st.stop()
-
-st.markdown(
-    "**Mechanistic background (gut–lung axis):** Sepsis-related gut barrier disruption and dysbiosis can aggravate pulmonary inflammation via the gut–lung axis, thereby worsening ARDS. Early identification of gut dysbiosis risk allows clinicians to intervene earlier."
-)
+        st.error(f"Prediction failed: {e}\n\nTraceback:\n{traceback.format_exc()}")
