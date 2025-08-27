@@ -1,3 +1,39 @@
+# 首先添加依赖检查和安装代码
+import subprocess
+import sys
+import importlib
+
+# 确保所有必需的库都已安装
+required_packages = [
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "streamlit>=1.30.0",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    "xgboost>=2.0.0",
+    "lightgbm>=4.0.0",
+    "catboost>=1.2.0",
+    "imbalanced-learn>=0.12.0",
+    "shap>=0.46.0",
+    "joblib>=1.3.0",
+    "scipy>=1.11.0"
+]
+
+def install_missing_packages():
+    for package in required_packages:
+        # 提取包名（去掉版本信息）
+        package_name = package.split('>=')[0].split('==')[0]
+        try:
+            importlib.import_module(package_name.replace('-', '_'))
+        except ImportError:
+            print(f"安装缺失的包: {package}")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# 安装所有缺失的包
+install_missing_packages()
+
+# 现在导入所有需要的库
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -33,15 +69,13 @@ def load_model(model_path):
 # 获取模型使用的特征
 def get_model_features():
     """获取模型需要的特征列表"""
-    # 这里应该替换为你模型实际使用的前10个SHAP特征
-    # 从你的代码中可知这些特征保存在deploy_dir/used_features.txt
     try:
         with open(os.path.join('deploy_model', 'used_features.txt'), 'r', encoding='utf-8') as f:
             lines = f.readlines()
             features = [line.strip().split('. ')[1] for line in lines[1:11]]  # 取前10个特征
         return features
     except:
-        # 如果无法读取特征文件，使用默认特征列表（请根据实际情况修改）
+        # 如果无法读取特征文件，使用默认特征列表
         return [
             'Age', 'LAC', 'WBC', 'Absolute neutrophil count',
             'Absolute lymphocyte count', 'PLT', 'Albumin',
@@ -51,8 +85,6 @@ def get_model_features():
 # 加载特征信息和参考范围
 def load_feature_info():
     """加载特征的参考范围和说明"""
-    # 这里定义了每个特征的参考范围和简要说明
-    # 你可以根据实际医学知识调整这些值
     feature_info = {
         'Age': {'range': (0, 120), 'unit': '岁', 'desc': '患者年龄'},
         'LAC': {'range': (0, 20), 'unit': 'mmol/L', 'desc': '乳酸水平，反映组织缺氧情况'},
@@ -181,8 +213,7 @@ def main():
                     （完整分析请参考模型SHAP值报告）
                     """)
                     
-                    # 这里是简化的特征重要性展示
-                    # 在实际应用中，你可以加载预计算的SHAP值来提供更准确的分析
+                    # 简化的特征重要性展示
                     importance = np.random.rand(len(features))  # 随机生成示例重要性
                     importance = importance / np.sum(importance)
                     
@@ -208,3 +239,4 @@ def footer():
 if __name__ == "__main__":
     main()
     footer()
+    
