@@ -1,13 +1,13 @@
-streamlit==1.28.1
-pandas==1.5.3
-numpy==1.24.3
-scikit-learn==1.2.2
-matplotlib==3.7.1
-seaborn==0.12.2
-xgboost==1.7.5
-lightgbm==3.3.5
-catboost==1.1.1
-imbalanced-learn==0.10.1
-shap==0.47.0  # 用于特征重要性分析
-joblib>=1.2.0  # 模型序列化可能用到
-scipy>=1.10.1  # 科学计算依赖，许多模型会间接用到
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+xgboost
+lightgbm
+catboost
+imbalanced-learn
+shap
+joblib
+scipy
