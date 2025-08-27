@@ -5,133 +5,152 @@ import importlib
 import os
 import time
 
-# 优先尝试安装matplotlib，解决核心依赖问题
-def force_install_matplotlib():
-    """强制安装matplotlib，使用不同方法确保成功"""
-    # 尝试不同的安装命令格式
-    install_commands = [
-        [sys.executable, "-m", "pip", "install", "matplotlib>=3.8.0"],
-        [sys.executable, "-m", "pip", "install", "--upgrade", "matplotlib"],
-        [sys.executable, "-m", "pip", "install", "--user", "matplotlib"],
-        ["pip", "install", "matplotlib"]  # 最后尝试系统pip
-    ]
-    
-    for cmd in install_commands:
-        try:
-            print(f"尝试安装matplotlib: {cmd}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                print("matplotlib安装成功")
-                # 安装成功后等待2秒再尝试导入
-                time.sleep(2)
-                # 强制重新加载模块
-                if 'matplotlib' in sys.modules:
-                    del sys.modules['matplotlib']
-                return True
-            else:
-                print(f"安装命令失败，返回码: {result.returncode}")
-                print(f"错误输出: {result.stderr}")
-        except Exception as e:
-            print(f"安装matplotlib时出错: {str(e)}")
-    
-    return False
-
-# 首先确保matplotlib安装成功
-matplotlib_installed = force_install_matplotlib()
-
-# 确保所有必需的库都已安装
+# 定义所有需要的包，按依赖顺序排列
 required_packages = [
-    "seaborn>=0.13.0",
-    "streamlit>=1.30.0",
-    "pandas>=2.0.0",
     "numpy>=1.26.0",
+    "scipy>=1.11.0",
+    "matplotlib>=3.8.0",
+    "pandas>=2.0.0",
+    "seaborn>=0.13.0",
     "scikit-learn>=1.4.0",
+    "joblib>=1.3.0",
     "xgboost>=2.0.0",
     "lightgbm>=4.0.0",
     "catboost>=1.2.0",
     "imbalanced-learn>=0.12.0",
     "shap>=0.46.0",
-    "joblib>=1.3.0",
-    "scipy>=1.11.0"
+    "streamlit>=1.30.0"
 ]
 
-def install_missing_packages():
-    """安装缺失的包，使用更稳健的方式"""
-    # 检查是否在Streamlit Cloud环境
-    is_streamlit_cloud = os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud"
+def install_package(package):
+    """尝试多种方式安装单个包"""
+    # 提取包名
+    package_name = package.split('>=')[0].split('==')[0]
     
+    # 尝试不同的安装命令
+    install_commands = [
+        [sys.executable, "-m", "pip", "install", package],
+        [sys.executable, "-m", "pip", "install", "--upgrade", package],
+        [sys.executable, "-m", "pip", "install", "--user", package],
+        ["pip", "install", package]
+    ]
+    
+    for cmd in install_commands:
+        try:
+            print(f"尝试安装 {package}: {cmd}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60  # 延长超时时间
+            )
+            if result.returncode == 0:
+                print(f"{package} 安装成功")
+                # 安装成功后短时间等待
+                time.sleep(1)
+                return True
+            else:
+                print(f"安装命令失败，返回码: {result.returncode}")
+                print(f"错误输出: {result.stderr[:500]}")  # 只显示前500字符
+        except Exception as e:
+            print(f"安装 {package} 时出错: {str(e)}")
+    
+    return False
+
+def install_all_packages():
+    """按顺序安装所有包，确保依赖关系正确"""
+    # 先检查是否在Streamlit Cloud环境
+    is_streamlit_cloud = os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud"
+    print(f"Streamlit Cloud环境: {is_streamlit_cloud}")
+    
+    # 逐个安装包，前面的包是后面的依赖
     for package in required_packages:
-        # 提取包名（去掉版本信息）
         package_name = package.split('>=')[0].split('==')[0]
-        # 处理包名中的横线（如imbalanced-learn -> imblearn）
         import_name = package_name.replace('imbalanced-learn', 'imblearn').replace('-', '_')
         
         try:
+            # 检查是否已安装
             importlib.import_module(import_name)
-            print(f"包 {package_name} 已安装")
+            print(f"包 {package_name} 已安装，跳过")
+            continue
         except ImportError:
-            print(f"尝试安装缺失的包: {package}")
-            try:
-                # 构建安装命令
-                install_cmd = [sys.executable, "-m", "pip", "install"]
-                
-                # 在Streamlit Cloud上添加--user参数避免权限问题
-                if is_streamlit_cloud:
-                    install_cmd.append("--user")
-                
-                install_cmd.append(package)
-                
-                # 执行安装命令，允许输出以调试
-                result = subprocess.run(
-                    install_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                print(f"成功安装 {package}: {result.stdout}")
-            except subprocess.CalledProcessError as e:
-                print(f"安装 {package} 失败，错误码: {e.returncode}")
-                print(f"错误输出: {e.stderr}")
-            except Exception as e:
-                print(f"安装 {package} 时发生意外错误: {str(e)}")
+            print(f"包 {package_name} 未安装，需要安装")
+        
+        # 尝试安装
+        success = install_package(package)
+        if not success:
+            print(f"警告: {package} 安装失败，将尝试继续")
 
-# 安装其他缺失的包
-install_missing_packages()
+# 首先安装所有依赖
+install_all_packages()
 
-# 尝试导入matplotlib，多次尝试以防失败
-def import_matplotlib():
-    """多次尝试导入matplotlib，确保成功"""
-    for _ in range(5):  # 最多尝试5次
-        try:
-            import matplotlib
-            matplotlib.use('Agg')  # 使用非交互式后端
-            import matplotlib.pyplot as plt
-            print("matplotlib成功导入")
-            return plt
-        except ImportError as e:
-            print(f"matplotlib导入失败，重试... 错误: {str(e)}")
-            time.sleep(1)  # 等待1秒后重试
+# 安全导入函数 - 逐个导入并处理可能的错误
+def safe_imports():
+    """安全导入所有需要的库，处理可能的导入错误"""
+    imports = {
+        'streamlit': 'st',
+        'pandas': 'pd',
+        'numpy': 'np',
+        'pickle': 'pickle',
+        'os': 'os',
+        'matplotlib.pyplot': 'plt',
+        'seaborn': 'sns',
+        'sklearn.preprocessing': ['StandardScaler', 'OneHotEncoder']
+    }
     
-    # 如果所有尝试都失败，尝试使用streamlit的替代方案
-    print("matplotlib导入失败，尝试使用streamlit替代可视化")
-    return None
+    imported = {}
+    
+    # 首先尝试导入matplotlib并设置后端
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # 使用非交互式后端
+        import matplotlib.pyplot as plt
+        imported['plt'] = plt
+        print("matplotlib成功导入")
+    except Exception as e:
+        print(f"matplotlib导入失败: {str(e)}")
+        imported['plt'] = None
+    
+    # 导入其他库
+    for module, alias in imports.items():
+        if module == 'matplotlib.pyplot':
+            continue  # 已经处理过
+        
+        try:
+            if isinstance(alias, list):
+                # 处理从模块导入多个类的情况
+                imported_module = importlib.import_module(module)
+                for item in alias:
+                    imported[item] = getattr(imported_module, item)
+                print(f"成功导入 {module} 中的 {alias}")
+            else:
+                # 处理普通导入
+                imported[alias] = importlib.import_module(module)
+                print(f"成功导入 {module} 为 {alias}")
+        except ImportError as e:
+            print(f"导入 {module} 失败: {str(e)}")
+            imported[alias] = None
+    
+    return imported
 
-# 导入所有需要的库
-import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-import os
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+# 执行安全导入
+imp = safe_imports()
 
-# 单独处理matplotlib的导入
-plt = import_matplotlib()
+# 检查关键库是否导入成功
+if imp['st'] is None:
+    print("错误: streamlit导入失败，应用无法运行")
+    sys.exit(1)
+
+# 从导入结果中提取所需的库
+st = imp['st']
+pd = imp['pd']
+np = imp['np']
+pickle = imp['pickle']
+os = imp['os']
+plt = imp['plt']
+sns = imp['sns']
+StandardScaler = imp.get('StandardScaler')
+OneHotEncoder = imp.get('OneHotEncoder')
 
 # 设置页面配置
 st.set_page_config(
@@ -144,9 +163,15 @@ st.set_page_config(
 st.title("脓毒症合并肠道菌群失调预测模型")
 st.write("基于机器学习的脓毒症患者肠道菌群失调风险预测工具")
 
-# 检查matplotlib是否可用，如果不可用显示警告
+# 检查缺失的库并显示警告
+missing_libraries = []
 if plt is None:
-    st.warning("图表可视化功能受限，matplotlib库未能正确加载。预测功能仍可使用。")
+    missing_libraries.append("matplotlib (图表功能)")
+if sns is None:
+    missing_libraries.append("seaborn (高级可视化)")
+
+if missing_libraries:
+    st.warning(f"以下功能可能受限，因为某些库未能加载: {', '.join(missing_libraries)}。预测功能仍可使用。")
 
 # 加载模型
 @st.cache_resource
@@ -287,8 +312,8 @@ def main():
                 临床医生应结合患者具体情况进行综合判断。
                 """)
                 
-                # 只有当matplotlib可用时才绘制图表
-                if plt is not None:
+                # 只有当matplotlib和seaborn可用时才绘制图表
+                if plt is not None and sns is not None:
                     # 绘制风险可视化图表
                     try:
                         fig, ax = plt.subplots(figsize=(8, 2))
@@ -329,7 +354,7 @@ def main():
                         except Exception as e:
                             st.warning(f"特征重要性图表绘制失败: {str(e)}")
                 else:
-                    st.info("图表功能暂时不可用，我们正在努力解决这个问题。")
+                    st.info("图表功能暂时不可用，核心预测功能不受影响。")
 
 # 页脚信息
 def footer():
