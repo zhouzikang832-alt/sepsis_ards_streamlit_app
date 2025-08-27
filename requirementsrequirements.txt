@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib  # 明确指定这个库
+seaborn
+xgboost
+lightgbm
+catboost
+imbalanced-learn
+shap
+joblib
+scipy
