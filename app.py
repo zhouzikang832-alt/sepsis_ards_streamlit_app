@@ -2,6 +2,7 @@
 import subprocess
 import sys
 import importlib
+import os
 
 # 确保所有必需的库都已安装
 required_packages = [
@@ -21,27 +22,65 @@ required_packages = [
 ]
 
 def install_missing_packages():
+    """安装缺失的包，使用更稳健的方式"""
+    # 检查是否在Streamlit Cloud环境
+    is_streamlit_cloud = os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud"
+    
     for package in required_packages:
         # 提取包名（去掉版本信息）
         package_name = package.split('>=')[0].split('==')[0]
+        # 处理包名中的横线（如imbalanced-learn -> imblearn）
+        import_name = package_name.replace('imbalanced-learn', 'imblearn').replace('-', '_')
+        
         try:
-            importlib.import_module(package_name.replace('-', '_'))
+            importlib.import_module(import_name)
+            print(f"包 {package_name} 已安装")
         except ImportError:
-            print(f"安装缺失的包: {package}")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            print(f"尝试安装缺失的包: {package}")
+            try:
+                # 构建安装命令
+                install_cmd = [sys.executable, "-m", "pip", "install"]
+                
+                # 在Streamlit Cloud上添加--user参数避免权限问题
+                if is_streamlit_cloud:
+                    install_cmd.append("--user")
+                
+                install_cmd.append(package)
+                
+                # 执行安装命令，允许输出以调试
+                result = subprocess.run(
+                    install_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                print(f"成功安装 {package}: {result.stdout}")
+            except subprocess.CalledProcessError as e:
+                print(f"安装 {package} 失败，错误码: {e.returncode}")
+                print(f"错误输出: {e.stderr}")
+                # 不中断执行，继续尝试安装其他包
+            except Exception as e:
+                print(f"安装 {package} 时发生意外错误: {str(e)}")
 
 # 安装所有缺失的包
 install_missing_packages()
 
-# 现在导入所有需要的库
-import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+# 延迟导入，确保安装完成后再导入
+def safe_import():
+    """安全导入所有需要的库，确保安装完成"""
+    global st, pd, np, pickle, os, plt, sns, StandardScaler, OneHotEncoder
+    
+    import streamlit as st
+    import pandas as pd
+    import numpy as np
+    import pickle
+    import os
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.preprocessing import StandardScaler, OneHotEncoder
+
+# 执行安全导入
+safe_import()
 
 # 设置页面配置
 st.set_page_config(
