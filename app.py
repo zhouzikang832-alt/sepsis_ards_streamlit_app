@@ -185,26 +185,32 @@ def load_model(model_path):
         st.error(f"模型加载失败: {str(e)}")
         return None
 
-# 获取模型使用的特征
+# 获取模型使用的特征 - 更新为包含所有必要特征
 def get_model_features():
     """获取模型需要的特征列表"""
     try:
+        # 尝试从文件读取特征列表
         with open(os.path.join('deploy_model', 'used_features.txt'), 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            features = [line.strip().split('. ')[1] for line in lines[1:11]]  # 取前10个特征
+            features = [line.strip().split('. ')[1] for line in lines if line.strip()]
         return features
     except:
-        # 如果无法读取特征文件，使用默认特征列表
+        # 如果无法读取特征文件，使用已知需要的特征列表（包含缺失的特征）
         return [
+            # 原有特征
             'Age', 'LAC', 'WBC', 'Absolute neutrophil count',
             'Absolute lymphocyte count', 'PLT', 'Albumin',
-            'BUN', 'CRE', 'NLR'
+            'BUN', 'CRE', 'NLR',
+            # 缺失的特征
+            'Shock_Index', 'Glu', 'SPO2-MAX', 'HR-MIN', 
+            'Race', 'PH', 'Diabetes', 'Absolute monocytes count', 'Length of stay'
         ]
 
-# 加载特征信息和参考范围
+# 加载特征信息和参考范围 - 添加缺失特征的信息
 def load_feature_info():
     """加载特征的参考范围和说明"""
     feature_info = {
+        # 原有特征
         'Age': {'range': (0, 120), 'unit': '岁', 'desc': '患者年龄'},
         'LAC': {'range': (0, 20), 'unit': 'mmol/L', 'desc': '乳酸水平，反映组织缺氧情况'},
         'WBC': {'range': (0, 50), 'unit': '×10^9/L', 'desc': '白细胞计数，反映炎症反应'},
@@ -214,7 +220,18 @@ def load_feature_info():
         'Albumin': {'range': (0, 60), 'unit': 'g/L', 'desc': '白蛋白水平，反映营养状态'},
         'BUN': {'range': (0, 50), 'unit': 'mmol/L', 'desc': '血尿素氮，反映肾功能'},
         'CRE': {'range': (0, 500), 'unit': 'μmol/L', 'desc': '肌酐，反映肾功能'},
-        'NLR': {'range': (0, 100), 'unit': '', 'desc': '中性粒细胞与淋巴细胞比值，反映炎症状态'}
+        'NLR': {'range': (0, 100), 'unit': '', 'desc': '中性粒细胞与淋巴细胞比值，反映炎症状态'},
+        
+        # 新增缺失的特征
+        'Shock_Index': {'range': (0, 5), 'unit': '', 'desc': '休克指数，心率/收缩压'},
+        'Glu': {'range': (2, 30), 'unit': 'mmol/L', 'desc': '血糖水平'},
+        'SPO2-MAX': {'range': (50, 100), 'unit': '%', 'desc': '最高血氧饱和度'},
+        'HR-MIN': {'range': (30, 200), 'unit': '次/分', 'desc': '最低心率'},
+        'Race': {'range': (0, 5), 'unit': '', 'desc': '种族 (0-5表示不同种族分类)'},
+        'PH': {'range': (6.8, 7.8), 'unit': '', 'desc': '血液酸碱度'},
+        'Diabetes': {'range': (0, 1), 'unit': '', 'desc': '是否有糖尿病 (0=否, 1=是)'},
+        'Absolute monocytes count': {'range': (0, 5), 'unit': '×10^9/L', 'desc': '单核细胞绝对计数'},
+        'Length of stay': {'range': (0, 100), 'unit': '天', 'desc': '住院时间'}
     }
     
     # 对于模型实际使用的特征，如果不在上述字典中，添加默认值
@@ -236,6 +253,12 @@ def predict(model, input_data):
         # 确保输入数据是DataFrame且列顺序正确
         features = get_model_features()
         input_df = pd.DataFrame([input_data], columns=features)
+        
+        # 检查是否有缺失的特征
+        missing = set(features) - set(input_df.columns)
+        if missing:
+            st.error(f"预测失败：缺少必要特征 {missing}")
+            return None, None
         
         # 进行预测
         probability = model.predict_proba(input_df)[0][1]
@@ -268,11 +291,11 @@ def main():
     st.subheader("输入患者特征")
     input_data = {}
     
-    # 分两列显示输入框
-    cols = st.columns(2)
+    # 分三列显示输入框，适应更多特征
+    cols = st.columns(3)
     
     for i, feature in enumerate(features):
-        col = cols[i % 2]
+        col = cols[i % 3]
         with col:
             min_val, max_val = feature_info[feature]['range']
             unit = feature_info[feature]['unit']
