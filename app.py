@@ -206,6 +206,15 @@ def get_model_features():
             'Race', 'PH', 'Diabetes', 'Absolute monocytes count', 'Length of stay'
         ]
 
+# Define race categories mapping
+race_categories = {
+    "ASIAN": 0,
+    "WHITE": 1,
+    "BLACK": 2,
+    "HISPANIC": 3,
+    "OTHER": 4
+}
+
 # Load feature information and reference ranges - add information for missing features
 def load_feature_info():
     """Load feature reference ranges and descriptions"""
@@ -227,7 +236,7 @@ def load_feature_info():
         'Glu': {'range': (2, 30), 'unit': 'mmol/L', 'desc': 'Blood glucose level'},
         'SPO2-MAX': {'range': (50, 100), 'unit': '%', 'desc': 'Maximum oxygen saturation'},
         'HR-MIN': {'range': (30, 200), 'unit': 'bpm', 'desc': 'Minimum heart rate'},
-        'Race': {'range': (0, 5), 'unit': '', 'desc': 'Race (0-5 representing different racial classifications)'},
+        'Race': {'range': (0, 4), 'unit': '', 'desc': f'Race (categorical: {", ".join([f"{k}={v}" for k, v in race_categories.items()])})'},
         'PH': {'range': (6.8, 7.8), 'unit': '', 'desc': 'Blood pH level'},
         'Diabetes': {'range': (0, 1), 'unit': '', 'desc': 'Presence of diabetes (0=No, 1=Yes)'},
         'Absolute monocytes count': {'range': (0, 5), 'unit': '×10^9/L', 'desc': 'Absolute monocyte count'},
@@ -299,14 +308,34 @@ def main():
         with col:
             min_val, max_val = feature_info[feature]['range']
             unit = feature_info[feature]['unit']
-            input_data[feature] = st.number_input(
-                f"{feature} ({feature_info[feature]['desc']})",
-                min_value=float(min_val),
-                max_value=float(max_val),
-                value=float((min_val + max_val) / 2),
-                step=0.1,
-                format="%.1f"
-            )
+            
+            # Special handling for Race (dropdown selection)
+            if feature == 'Race':
+                race_option = st.selectbox(
+                    f"{feature} ({feature_info[feature]['desc']})",
+                    options=list(race_categories.keys())
+                )
+                input_data[feature] = race_categories[race_option]
+            
+            # Special handling for Diabetes (only 0 or 1)
+            elif feature == 'Diabetes':
+                diabetes_option = st.radio(
+                    f"{feature} ({feature_info[feature]['desc']})",
+                    options=[0, 1],
+                    format_func=lambda x: "Yes" if x == 1 else "No"
+                )
+                input_data[feature] = diabetes_option
+            
+            # Regular numeric input for other features
+            else:
+                input_data[feature] = st.number_input(
+                    f"{feature} ({feature_info[feature]['desc']})",
+                    min_value=float(min_val),
+                    max_value=float(max_val),
+                    value=float((min_val + max_val) / 2),
+                    step=0.1,
+                    format="%.1f"
+                )
     
     # Prediction button
     if st.button("Predict Gut Dysbiosis Risk", key="predict_btn"):
