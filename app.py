@@ -3,10 +3,49 @@ import subprocess
 import sys
 import importlib
 import os
+import time
+
+# 优先尝试安装matplotlib，解决核心依赖问题
+def force_install_matplotlib():
+    """强制安装matplotlib，使用不同方法确保成功"""
+    # 尝试不同的安装命令格式
+    install_commands = [
+        [sys.executable, "-m", "pip", "install", "matplotlib>=3.8.0"],
+        [sys.executable, "-m", "pip", "install", "--upgrade", "matplotlib"],
+        [sys.executable, "-m", "pip", "install", "--user", "matplotlib"],
+        ["pip", "install", "matplotlib"]  # 最后尝试系统pip
+    ]
+    
+    for cmd in install_commands:
+        try:
+            print(f"尝试安装matplotlib: {cmd}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                print("matplotlib安装成功")
+                # 安装成功后等待2秒再尝试导入
+                time.sleep(2)
+                # 强制重新加载模块
+                if 'matplotlib' in sys.modules:
+                    del sys.modules['matplotlib']
+                return True
+            else:
+                print(f"安装命令失败，返回码: {result.returncode}")
+                print(f"错误输出: {result.stderr}")
+        except Exception as e:
+            print(f"安装matplotlib时出错: {str(e)}")
+    
+    return False
+
+# 首先确保matplotlib安装成功
+matplotlib_installed = force_install_matplotlib()
 
 # 确保所有必需的库都已安装
 required_packages = [
-    "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
     "streamlit>=1.30.0",
     "pandas>=2.0.0",
@@ -58,29 +97,41 @@ def install_missing_packages():
             except subprocess.CalledProcessError as e:
                 print(f"安装 {package} 失败，错误码: {e.returncode}")
                 print(f"错误输出: {e.stderr}")
-                # 不中断执行，继续尝试安装其他包
             except Exception as e:
                 print(f"安装 {package} 时发生意外错误: {str(e)}")
 
-# 安装所有缺失的包
+# 安装其他缺失的包
 install_missing_packages()
 
-# 延迟导入，确保安装完成后再导入
-def safe_import():
-    """安全导入所有需要的库，确保安装完成"""
-    global st, pd, np, pickle, os, plt, sns, StandardScaler, OneHotEncoder
+# 尝试导入matplotlib，多次尝试以防失败
+def import_matplotlib():
+    """多次尝试导入matplotlib，确保成功"""
+    for _ in range(5):  # 最多尝试5次
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # 使用非交互式后端
+            import matplotlib.pyplot as plt
+            print("matplotlib成功导入")
+            return plt
+        except ImportError as e:
+            print(f"matplotlib导入失败，重试... 错误: {str(e)}")
+            time.sleep(1)  # 等待1秒后重试
     
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import pickle
-    import os
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from sklearn.preprocessing import StandardScaler, OneHotEncoder
+    # 如果所有尝试都失败，尝试使用streamlit的替代方案
+    print("matplotlib导入失败，尝试使用streamlit替代可视化")
+    return None
 
-# 执行安全导入
-safe_import()
+# 导入所有需要的库
+import streamlit as st
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+
+# 单独处理matplotlib的导入
+plt = import_matplotlib()
 
 # 设置页面配置
 st.set_page_config(
@@ -92,6 +143,10 @@ st.set_page_config(
 # 页面标题
 st.title("脓毒症合并肠道菌群失调预测模型")
 st.write("基于机器学习的脓毒症患者肠道菌群失调风险预测工具")
+
+# 检查matplotlib是否可用，如果不可用显示警告
+if plt is None:
+    st.warning("图表可视化功能受限，matplotlib库未能正确加载。预测功能仍可使用。")
 
 # 加载模型
 @st.cache_resource
@@ -232,39 +287,49 @@ def main():
                 临床医生应结合患者具体情况进行综合判断。
                 """)
                 
-                # 绘制风险可视化图表
-                fig, ax = plt.subplots(figsize=(8, 2))
-                ax.barh(['风险概率'], [risk_percent], color='skyblue')
-                ax.axvline(x=30, color='green', linestyle='--', alpha=0.5)
-                ax.axvline(x=70, color='orange', linestyle='--', alpha=0.5)
-                ax.set_xlim(0, 100)
-                ax.set_xlabel('风险概率 (%)')
-                ax.set_title('肠道菌群失调风险评估')
-                plt.text(30, 0, '  低风险', color='green')
-                plt.text(50, 0, '  中等风险', color='orange')
-                plt.text(85, 0, '  高风险', color='red')
-                st.pyplot(fig)
-                
-                # 特征贡献分析（简化版）
-                with st.expander("查看特征贡献分析", expanded=False):
-                    st.write("""
-                    特征贡献分析显示各因素对预测结果的影响程度。
-                    （完整分析请参考模型SHAP值报告）
-                    """)
+                # 只有当matplotlib可用时才绘制图表
+                if plt is not None:
+                    # 绘制风险可视化图表
+                    try:
+                        fig, ax = plt.subplots(figsize=(8, 2))
+                        ax.barh(['风险概率'], [risk_percent], color='skyblue')
+                        ax.axvline(x=30, color='green', linestyle='--', alpha=0.5)
+                        ax.axvline(x=70, color='orange', linestyle='--', alpha=0.5)
+                        ax.set_xlim(0, 100)
+                        ax.set_xlabel('风险概率 (%)')
+                        ax.set_title('肠道菌群失调风险评估')
+                        plt.text(30, 0, '  低风险', color='green')
+                        plt.text(50, 0, '  中等风险', color='orange')
+                        plt.text(85, 0, '  高风险', color='red')
+                        st.pyplot(fig)
+                    except Exception as e:
+                        st.warning(f"图表绘制失败: {str(e)}")
                     
-                    # 简化的特征重要性展示
-                    importance = np.random.rand(len(features))  # 随机生成示例重要性
-                    importance = importance / np.sum(importance)
-                    
-                    sorted_idx = np.argsort(importance)[::-1]
-                    sorted_features = [features[i] for i in sorted_idx]
-                    sorted_importance = [importance[i] for i in sorted_idx]
-                    
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    sns.barplot(x=sorted_importance, y=sorted_features, ax=ax)
-                    ax.set_xlabel('相对重要性')
-                    ax.set_title('特征对预测结果的影响')
-                    st.pyplot(fig)
+                    # 特征贡献分析（简化版）
+                    with st.expander("查看特征贡献分析", expanded=False):
+                        st.write("""
+                        特征贡献分析显示各因素对预测结果的影响程度。
+                        （完整分析请参考模型SHAP值报告）
+                        """)
+                        
+                        try:
+                            # 简化的特征重要性展示
+                            importance = np.random.rand(len(features))  # 随机生成示例重要性
+                            importance = importance / np.sum(importance)
+                            
+                            sorted_idx = np.argsort(importance)[::-1]
+                            sorted_features = [features[i] for i in sorted_idx]
+                            sorted_importance = [importance[i] for i in sorted_idx]
+                            
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            sns.barplot(x=sorted_importance, y=sorted_features, ax=ax)
+                            ax.set_xlabel('相对重要性')
+                            ax.set_title('特征对预测结果的影响')
+                            st.pyplot(fig)
+                        except Exception as e:
+                            st.warning(f"特征重要性图表绘制失败: {str(e)}")
+                else:
+                    st.info("图表功能暂时不可用，我们正在努力解决这个问题。")
 
 # 页脚信息
 def footer():
